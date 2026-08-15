@@ -1,13 +1,16 @@
 # standup-reminder
 
-A tiny, dependency-free macOS daemon that nudges you to **get up and move** after you've been continuously at your Mac for too long.
+**Languages:** English | [简体中文](README.zh-CN.md)
 
-When your continuous-use timer crosses the threshold, it hides all visible windows, pops a reminder dialog, and kicks off the screensaver — so you actually take the break instead of dismissing a notification and carrying on. The timer pauses when you lock the screen and resumes when you unlock, so idle time doesn't count against you.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-- Pure Bash + built-in macOS tools (`launchctl`, `osascript`, `pmset`-free) — nothing to compile, no runtime deps.
-- Accurate lock/unlock detection (console user + `ScreenSaverEngine`/`LockScreen` checks).
-- Single-instance lock, graceful shutdown, and a dry-run mode for testing.
-- Fully configurable via environment variables.
+A tiny macOS daemon that nudges you to **get up and move** after you have been at your Mac too long. It hides visible windows, shows a reminder, and starts the screensaver so the break is harder to ignore than a notification.
+
+Compared with menu-bar timers that you can swipe away, this one is meant to interrupt you. Compared with tools that only count from last wake, it also pauses while the screen is locked or the screensaver is running, then starts a fresh interval after unlock or wake.
+
+## Supported platforms
+
+**macOS only.** Linux and Windows are not supported — this tool depends on macOS login items, screensaver, and session state. On another OS the installer exits with a clear error.
 
 ## Install
 
@@ -16,9 +19,11 @@ When your continuous-use timer crosses the threshold, it hides all visible windo
 ```bash
 brew install x0c/tap/standup-reminder
 brew services start standup-reminder
+standup-reminder doctor
+standup-reminder now
 ```
 
-`brew services` registers it as a launchd agent that starts at login and restarts if it dies.
+`doctor` must say it is counting. `now` fires one reminder immediately so you know it actually works.
 
 ### One-line installer (no Homebrew)
 
@@ -26,69 +31,59 @@ brew services start standup-reminder
 curl -fsSL https://raw.githubusercontent.com/x0c/standup-reminder/main/install.sh | bash
 ```
 
-Or clone and run locally:
-
-```bash
-git clone https://github.com/x0c/standup-reminder.git
-cd standup-reminder
-./install.sh
-```
-
-The installer copies the script to `~/.local/bin/standup-reminder`, writes a launchd agent to `~/Library/LaunchAgents/io.github.x0c.standup-reminder.plist`, and loads it.
+The installer copies the script, registers a login item, waits until timing has started, and prints `doctor` / `now` if anything looks off.
 
 ## Usage
 
 ```bash
-standup-reminder            # run the daemon loop in the foreground (usually launchd-managed)
-standup-reminder status     # is the daemon running?
-standup-reminder stop       # stop the running daemon
-standup-reminder --dry-run  # run but only log — never hide windows / show dialog / start screensaver
+standup-reminder status     # running? counting? minutes until the next nudge
+standup-reminder doctor     # why it might be silent — run this first
+standup-reminder now        # fire one reminder right now
+standup-reminder stop       # stop it and disable start-at-login
+standup-reminder --dry-run  # run the loop but do not hide windows / dialog / screensaver
 standup-reminder --help
-standup-reminder --version
 ```
+
+`status` and `doctor` also accept `--json` for scripts.
 
 ## Configuration
 
-Set these as environment variables (for Homebrew, edit the service; for the installer, edit the plist's `EnvironmentVariables`).
+Set these as environment variables. Homebrew: `brew services` / the formula service block. Installer: `EnvironmentVariables` in `~/Library/LaunchAgents/io.github.x0c.standup-reminder.plist`.
 
 | Variable            | Default                                              | Description |
 |---------------------|------------------------------------------------------|-------------|
-| `REMINDER_INTERVAL` | `2700` (45 min; installer/brew default `3600`)       | Continuous-use seconds before a reminder fires. |
+| `REMINDER_INTERVAL` | `2700` (45 min; installer/brew default `3600`)       | Continuous unlocked use before a reminder. |
 | `REMINDER_MESSAGE`  | `起身走动一下~`                                       | Dialog text. |
-| `STATE_DIR`         | `~/Library/Application Support/standup-reminder`     | Where the PID file and logs live. |
-| `LOG_FILE`          | `$STATE_DIR/run.log`                                 | Log file path. |
-| `STANDUP_DRY_RUN`   | `0`                                                  | `1` = log only, take no visible action. |
+| `STATE_DIR`         | `~/Library/Application Support/standup-reminder`     | PID, state, logs. |
+| `LOG_FILE`          | `$STATE_DIR/run.log`                                 | Log file. |
+| `STANDUP_DRY_RUN`   | `0`                                                  | `1` = log only. |
 
-To change the interval after a Homebrew install:
-
-```bash
-brew services stop standup-reminder
-# edit the interval, or set it via a launchd override, then:
-brew services start standup-reminder
-```
-
-For the installer, edit `REMINDER_INTERVAL` in `~/Library/LaunchAgents/io.github.x0c.standup-reminder.plist`, then reload:
+Reload after editing the login-item file:
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/io.github.x0c.standup-reminder.plist
 launchctl load   ~/Library/LaunchAgents/io.github.x0c.standup-reminder.plist
+standup-reminder doctor
 ```
 
 ## How it works
 
-The daemon polls every 10 seconds:
+Every 10 seconds the daemon:
 
-1. **Unlocked?** It checks the console user and whether `ScreenSaverEngine` / `LockScreen` / `loginwindow` is frontmost. If the screen is locked or the saver is up, the timer is paused and reset.
-2. **Timing.** On the first unlocked tick it records a start time. Once `now - start ≥ REMINDER_INTERVAL`, it fires.
-3. **Firing.** It hides every visible app's windows, launches the screensaver, and shows a reminder dialog (auto-dismiss after 30s). Then it resets the timer.
+1. Treats screensaver, lock screen, or a logged-out console as **paused**.
+2. Treats an ambiguous session as **in use** (fail-open). A reminder tool must not stay silent because a front-app name parse failed.
+3. Resets the timer after system wake (`kern.waketime`), so sleep does not dump hours into the next interval.
+4. After `REMINDER_INTERVAL` of continuous unlocked use: hide windows, show the dialog, start the screensaver, then start a new interval.
 
-A PID file guarantees only one instance runs; the process cleans up its PID on exit.
-
-## Logs
+## If it never reminds you
 
 ```bash
+standup-reminder doctor
 tail -f "$HOME/Library/Application Support/standup-reminder/run.log"
+standup-reminder now
 ```
+
+`doctor` is the difference between “the process is running” and “it is actually counting time in front of you”. If doctor says it is paused while you are at the keyboard, the log will show why.
 
 ## Uninstall
 
@@ -107,7 +102,7 @@ Installer:
 
 ## Requirements
 
-macOS (uses `launchctl`, `osascript`, `lsappinfo`, `stat`). No other dependencies.
+macOS. Uses built-in `launchctl`, `osascript`, `lsappinfo`, and `sysctl`. Nothing to compile.
 
 ## License
 
