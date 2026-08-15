@@ -6,7 +6,7 @@ set -euo pipefail
 # - 超时后隐藏窗口、弹出提示、启动屏保
 # - 判断失败时按「正在使用」处理，避免静默从不提醒
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 
 REMINDER_INTERVAL=${REMINDER_INTERVAL:-2700}
 REMINDER_MESSAGE=${REMINDER_MESSAGE:-"起身走动一下~"}
@@ -141,24 +141,58 @@ front_app_name() {
   parse_front_name "$info"
 }
 
-# 判断失败时视为已解锁（fail-open）：提醒工具宁可多响，不能装上后永远不响。
-is_unlocked() {
-  local user front
-  user="$(console_user)"
-  [[ -n "$user" && "$user" != "loginwindow" && "$user" != "root" ]] || return 1
+# 系统会话字典里，锁屏时才会出现 CGSSessionScreenIsLocked；解锁时该键不存在。
+ioreg_reports_locked() {
+  local blob="${1-}"
+  if [[ -z "$blob" ]]; then
+    blob="$(/usr/sbin/ioreg -n Root -d1 2>/dev/null || true)"
+  fi
+  printf '%s' "$blob" | /usr/bin/grep -q 'CGSSessionScreenIsLocked'
+}
 
+screensaver_running() {
   if /usr/bin/pgrep -x "ScreenSaverEngine" >/dev/null; then
-    return 1
-  fi
-  if /usr/bin/pgrep -x "LockScreen" >/dev/null; then
-    return 1
-  fi
-
-  front="$(front_app_name || true)"
-  if [[ -z "$front" ]]; then
     return 0
   fi
-  [[ "$front" != "loginwindow" && "$front" != "ScreenSaverEngine" && "$front" != "LockScreen" && "$front" != "SecurityAgent" ]]
+  if /usr/bin/pgrep -x "LockScreen" >/dev/null; then
+    return 0
+  fi
+  if /usr/bin/pgrep -f 'legacyScreenSaver.appex' >/dev/null; then
+    return 0
+  fi
+  local running
+  running="$(/usr/bin/osascript -e 'tell application "System Events" to get running of screen saver preferences' 2>/dev/null || true)"
+  [[ "$running" == "true" ]]
+}
+
+away_reason() {
+  local user front
+  user="$(console_user)"
+  if [[ -z "$user" || "$user" == "loginwindow" || "$user" == "root" ]]; then
+    printf 'loginwindow'
+    return 0
+  fi
+  if ioreg_reports_locked; then
+    printf 'locked'
+    return 0
+  fi
+  if screensaver_running; then
+    printf 'screensaver'
+    return 0
+  fi
+  front="$(front_app_name || true)"
+  case "$front" in
+    loginwindow|ScreenSaverEngine|LockScreen|SecurityAgent)
+      printf '%s' "$front"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# 屏保/锁屏用系统状态判断。前台应用名解析失败仍视为在用，避免再出现「装了从不响」。
+is_unlocked() {
+  ! away_reason >/dev/null
 }
 
 write_state() {
@@ -521,7 +555,7 @@ run_daemon() {
   acquire_single_instance
   log "启动 (提醒间隔=${REMINDER_INTERVAL}秒, 提示=\"$REMINDER_MESSAGE\", dry_run=${STANDUP_DRY_RUN})"
 
-  local unlocked_since=0 last_unlocked=false last_wake="" now elapsed front
+  local unlocked_since=0 last_unlocked=false last_wake="" now elapsed reason
   local ticks_unlocked=0 ticks_locked=0
   last_wake="$(wake_sec)"
 
@@ -563,18 +597,18 @@ run_daemon() {
         log "计时已重置"
       fi
     else
-      front="$(front_app_name || true)"
+      reason="$(away_reason || true)"
       if [[ "$last_unlocked" == "true" ]]; then
-        log "检测到锁屏或屏保，计时已重置（前台应用=${front:-未知}）"
+        log "检测到离开（${reason:-unknown}），计时已重置"
         unlocked_since=0
         ticks_locked=0
       fi
       last_unlocked=false
       ticks_unlocked=0
       ticks_locked=$((ticks_locked + 1))
-      write_state "locked" 0 0 "locked"
+      write_state "locked" 0 0 "${reason:-locked}"
       if ((ticks_locked == 1 || ticks_locked % LOCKED_HEARTBEAT_EVERY == 0)); then
-        log "仍判定为锁屏/屏保，不计时（前台应用=${front:-未知}）。若你正在用电脑，请运行 standup-reminder doctor"
+        log "仍判定为离开，不计时（原因=${reason:-unknown}）。若你正在用电脑，请运行 standup-reminder doctor"
       fi
     fi
 
@@ -645,6 +679,14 @@ case "${1:-start}" in
     ;;
   __parse-front)
     cmd_parse_front "${2-}"
+    ;;
+  __ioreg-locked)
+    if ioreg_reports_locked "${2-}"; then
+      printf 'locked\n'
+      exit 0
+    fi
+    printf 'unlocked\n'
+    exit 1
     ;;
   __is-unlocked)
     if is_unlocked; then

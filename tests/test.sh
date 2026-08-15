@@ -41,6 +41,20 @@ empty_out="$("$BIN" __parse-front 'bundleID=[ NULL ]')"
 pass "空前台名"
 
 set +e
+"$BIN" __ioreg-locked 'kCGSSessionOnConsoleKey=Yes' >/dev/null
+ioreg_unlocked=$?
+set -e
+[[ "$ioreg_unlocked" == "1" ]] || fail "无锁屏键应视为未锁"
+pass "ioreg 无锁屏键"
+
+set +e
+ioreg_locked_out="$("$BIN" __ioreg-locked 'CGSSessionScreenIsLocked=Yes')"
+ioreg_locked=$?
+set -e
+[[ "$ioreg_locked" == "0" && "$ioreg_locked_out" == locked ]] || fail "有锁屏键应视为已锁: [$ioreg_locked_out] $ioreg_locked"
+pass "ioreg 有锁屏键"
+
+set +e
 status_out="$("$BIN" status 2>&1)"
 status_code=$?
 set -e
