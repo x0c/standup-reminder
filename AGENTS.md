@@ -52,5 +52,19 @@ bash tests/test.sh
 
 ## 文档导航
 
-- `README.md` / `README.zh-CN.md`：对外安装与使用。改安装渠道或命令面时两边一起改。
-- `docs/TROUBLESHOOTING.md`：排「装了从不响」、热角/锁屏后计时不清零、或核对离开识别是否真生效前 **必读**。只看进程在跑会误判已修好。
+> 以下文档在涉及对应领域的开发、评审或排查时先读取。
+
+- `README.md` / `README.zh-CN.md`：对外安装渠道、命令面、中英同步。
+- `docs/TROUBLESHOOTING.md`：装了从不响、热角/锁屏后计时不清零、离开识别是否真生效。
+- `docs/CONTINUOUS_USE_KNOWLEDGE_BASE.md`：连续使用计时、离开识别、热角屏保/锁屏清零、到点打断、提醒间隔。
+- `docs/INSTALL_RESIDENCY_KNOWLEDGE_BASE.md`：本机安装、登录常驻、自检、停止、发版、Homebrew 与安装脚本并存。
+- `docs/OPERATIONS_GUIDE.md`：本机启动、探活、日志路径、停止卸载。
+
+## 领域地图（doc-init）
+
+<!-- 覆盖度复核基线：2026-08-15 · 源码指纹 扫描 20 文件 / 无识别语言 / 0 子模块 · 基线提交 ce2f11a -->
+
+| 领域 | 入口锚点 |
+|------|---------|
+| 连续使用计时 | tests/test.sh |
+| 安装与常驻自检 | scripts/publish-release.sh |

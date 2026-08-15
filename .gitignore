@@ -2,4 +2,5 @@
 *.log
 *.pid
 .idea
+.doc-init-*.json
 
