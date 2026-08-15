@@ -88,4 +88,26 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   pass "本机解锁判定"
 fi
 
+export AWAY_DEBOUNCE_SECONDS=180
+set +e
+hold_out="$("$BIN" __away-long-enough 100 279)"
+hold_code=$?
+set -e
+[[ "$hold_code" == "1" && "$hold_out" == hold ]] || fail "179秒离开不应清零: [$hold_out] $hold_code"
+pass "离开 179 秒仍接着计"
+
+set +e
+reset_out="$("$BIN" __away-long-enough 100 280)"
+reset_code=$?
+set -e
+[[ "$reset_code" == "0" && "$reset_out" == reset ]] || fail "180秒离开应清零: [$reset_out] $reset_code"
+pass "离开 180 秒才清零"
+
+set +e
+zero_out="$("$BIN" __away-long-enough 0 999)"
+zero_code=$?
+set -e
+[[ "$zero_code" == "1" && "$zero_out" == hold ]] || fail "未进入离开不应清零: [$zero_out] $zero_code"
+pass "尚未离开不清零"
+
 pass "全部通过"

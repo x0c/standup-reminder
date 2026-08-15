@@ -6,7 +6,7 @@
 
 A tiny macOS daemon that nudges you to **get up and move** after you have been at your Mac too long. It hides visible windows, shows a reminder, and starts the screensaver so the break is harder to ignore than a notification.
 
-Compared with menu-bar timers that you can swipe away, this one is meant to interrupt you. Compared with tools that only count from last wake, it also pauses while the screen is locked or the screensaver is running, then starts a fresh interval after unlock or wake.
+Compared with menu-bar timers that you can swipe away, this one is meant to interrupt you. Compared with tools that only count from last wake, it also notices lock and screensaver. A leave shorter than **3 minutes** (dimmed display, accidental hot corner, quick lid close) does **not** reset the timer — you were still sitting. Stay away 3 minutes or more, and the next hour starts fresh.
 
 ## Supported platforms
 
@@ -54,6 +54,7 @@ Set these as environment variables. Homebrew: `brew services` / the formula serv
 |---------------------|------------------------------------------------------|-------------|
 | `REMINDER_INTERVAL` | `2700` (45 min; installer/brew default `3600`)       | Continuous unlocked use before a reminder. |
 | `REMINDER_MESSAGE`  | `起身走动一下~`                                       | Dialog text. |
+| `AWAY_DEBOUNCE_SECONDS` | `180` (3 min)                                    | Leave this long before the timer resets. Come back sooner and it keeps counting. |
 | `STATE_DIR`         | `~/Library/Application Support/standup-reminder`     | PID, state, logs. |
 | `LOG_FILE`          | `$STATE_DIR/run.log`                                 | Log file. |
 | `STANDUP_DRY_RUN`   | `0`                                                  | `1` = log only. |
@@ -70,10 +71,11 @@ standup-reminder doctor
 
 Every 10 seconds the daemon:
 
-1. Treats screensaver, lock screen, or a logged-out console as **paused**.
+1. Treats screensaver, lock screen, or a logged-out console as **away**.
 2. Treats an ambiguous session as **in use** (fail-open). A reminder tool must not stay silent because a front-app name parse failed.
-3. Resets the timer after system wake (`kern.waketime`), so sleep does not dump hours into the next interval.
-4. After `REMINDER_INTERVAL` of continuous unlocked use: hide windows, show the dialog, start the screensaver, then start a new interval.
+3. **Does not reset** until you have been away for `AWAY_DEBOUNCE_SECONDS` (default 3 minutes). Come back sooner and the same sitting stretch continues, including those minutes.
+4. After a long sleep (the process was frozen longer than the debounce), starts a fresh interval so hours asleep are not dumped into the next nudge.
+5. After `REMINDER_INTERVAL` of continuous sitting: hide windows, show the dialog, start the screensaver, then start a new interval.
 
 ## If it never reminds you
 

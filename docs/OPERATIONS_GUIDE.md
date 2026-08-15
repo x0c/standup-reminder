@@ -24,7 +24,7 @@ STANDUP_FORCE_TEXT=1 ~/.local/bin/standup-reminder status
 tail -f "$HOME/Library/Application Support/standup-reminder/run.log"
 ```
 
-关键句：`检测到解锁，开始计时`、`计时中`、`检测到离开（screensaver|locked）`、`检测到系统唤醒`。
+关键句：`检测到解锁，开始计时`、`计时中`、`检测到离开…未满3分钟回来则继续计时`、`短离开未满3分钟，继续计时`、`离开已满3分钟，计时已重置`、`短唤醒未满3分钟，继续计时`、`休眠已满3分钟，计时已重置`。
 
 ## 停止
 

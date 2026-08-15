@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # standup-reminder —— macOS 久坐提醒守护脚本
-# - 解锁后开始计时；锁屏 / 屏保 / 系统休眠唤醒后重置
+# - 解锁后开始计时；锁屏 / 屏保 / 休眠须持续满防抖窗口才重置
 # - 超时后隐藏窗口、弹出提示、启动屏保
 # - 判断失败时按「正在使用」处理，避免静默从不提醒
 
-VERSION="0.2.1"
+VERSION="0.2.2"
 
 REMINDER_INTERVAL=${REMINDER_INTERVAL:-2700}
 REMINDER_MESSAGE=${REMINDER_MESSAGE:-"起身走动一下~"}
@@ -24,6 +24,8 @@ POLL_SECONDS=10
 STATE_STALE_AFTER=30
 HEARTBEAT_EVERY=6
 LOCKED_HEARTBEAT_EVERY=60
+# 离开未满此时长又回来，视为没起身：接着计，离开那段也算坐着。
+AWAY_DEBOUNCE_SECONDS=${AWAY_DEBOUNCE_SECONDS:-180}
 
 usage() {
   cat <<EOF
@@ -41,11 +43,12 @@ standup-reminder $VERSION —— macOS 久坐提醒守护脚本
   standup-reminder --version   显示版本号
 
 环境变量:
-  REMINDER_INTERVAL   连续使用多久后提醒（秒），默认 2700（45 分钟）
-  REMINDER_MESSAGE    提醒弹窗文案，默认 "起身走动一下~"
-  STATE_DIR           状态与日志目录
-  LOG_FILE            日志文件路径
-  STANDUP_DRY_RUN     置 1 时只记日志，不隐藏窗口/不弹提醒/不启屏保
+  REMINDER_INTERVAL         连续使用多久后提醒（秒），默认 2700（45 分钟）
+  REMINDER_MESSAGE          提醒弹窗文案，默认 "起身走动一下~"
+  AWAY_DEBOUNCE_SECONDS     离开多久才清零（秒），默认 180。未满又回来则接着计
+  STATE_DIR                 状态与日志目录
+  LOG_FILE                  日志文件路径
+  STANDUP_DRY_RUN           置 1 时只记日志，不隐藏窗口/不弹提醒/不启屏保
 
 日志:
   tail -f "$LOG_FILE"
@@ -193,6 +196,19 @@ away_reason() {
 # 屏保/锁屏用系统状态判断。前台应用名解析失败仍视为在用，避免再出现「装了从不响」。
 is_unlocked() {
   ! away_reason >/dev/null
+}
+
+# 离开从 started 起算，满防抖窗口才清零。started=0 表示尚未进入离开。
+away_long_enough() {
+  local started="${1:-0}" now="${2:-}"
+  now="${now:-$(/bin/date +%s)}"
+  [[ "$started" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "$now" =~ ^[0-9]+$ ]] || return 1
+  (( now - started >= AWAY_DEBOUNCE_SECONDS ))
+}
+
+debounce_minutes() {
+  printf '%s' "$((AWAY_DEBOUNCE_SECONDS / 60))"
 }
 
 write_state() {
@@ -553,28 +569,38 @@ cmd_now() {
 run_daemon() {
   require_macos || exit 1
   acquire_single_instance
-  log "启动 (提醒间隔=${REMINDER_INTERVAL}秒, 提示=\"$REMINDER_MESSAGE\", dry_run=${STANDUP_DRY_RUN})"
+  log "启动 (提醒间隔=${REMINDER_INTERVAL}秒, 离开防抖=${AWAY_DEBOUNCE_SECONDS}秒, 提示=\"$REMINDER_MESSAGE\", dry_run=${STANDUP_DRY_RUN})"
 
   local unlocked_since=0 last_unlocked=false last_wake="" now elapsed reason
-  local ticks_unlocked=0 ticks_locked=0
+  local ticks_unlocked=0 ticks_locked=0 away_since=0 last_loop_now
   last_wake="$(wake_sec)"
+  last_loop_now="$(/bin/date +%s)"
 
   while true; do
     now="$(/bin/date +%s)"
     local wake
     wake="$(wake_sec)"
     if [[ -n "$wake" && -n "$last_wake" && "$wake" != "$last_wake" ]]; then
-      log "检测到系统唤醒，计时已重置"
-      unlocked_since=0
-      last_unlocked=false
-      ticks_unlocked=0
-      ticks_locked=0
-      write_state "locked" 0 0 "wake"
+      if away_long_enough "$last_loop_now" "$now"; then
+        log "休眠已满$(debounce_minutes)分钟，计时已重置"
+        unlocked_since=0
+        last_unlocked=false
+        away_since=0
+        ticks_unlocked=0
+        ticks_locked=0
+        write_state "locked" 0 0 "wake"
+      elif [[ "$unlocked_since" -gt 0 ]]; then
+        log "短唤醒未满$(debounce_minutes)分钟，继续计时"
+      fi
     fi
     last_wake="$wake"
 
     if is_unlocked; then
-      if [[ "$last_unlocked" == "false" ]]; then
+      if [[ "$away_since" -gt 0 ]]; then
+        log "短离开未满$(debounce_minutes)分钟，继续计时"
+        away_since=0
+        ticks_unlocked=0
+      elif [[ "$last_unlocked" == "false" ]]; then
         unlocked_since="$now"
         log "检测到解锁，开始计时"
         ticks_unlocked=0
@@ -598,20 +624,44 @@ run_daemon() {
       fi
     else
       reason="$(away_reason || true)"
-      if [[ "$last_unlocked" == "true" ]]; then
-        log "检测到离开（${reason:-unknown}），计时已重置"
-        unlocked_since=0
-        ticks_locked=0
-      fi
-      last_unlocked=false
-      ticks_unlocked=0
-      ticks_locked=$((ticks_locked + 1))
-      write_state "locked" 0 0 "${reason:-locked}"
-      if ((ticks_locked == 1 || ticks_locked % LOCKED_HEARTBEAT_EVERY == 0)); then
-        log "仍判定为离开，不计时（原因=${reason:-unknown}）。若你正在用电脑，请运行 standup-reminder doctor"
+      if [[ "$unlocked_since" -le 0 ]]; then
+        last_unlocked=false
+        ticks_unlocked=0
+        ticks_locked=$((ticks_locked + 1))
+        write_state "locked" 0 0 "${reason:-locked}"
+        if ((ticks_locked == 1 || ticks_locked % LOCKED_HEARTBEAT_EVERY == 0)); then
+          log "仍判定为离开，不计时（原因=${reason:-unknown}）。若你正在用电脑，请运行 standup-reminder doctor"
+        fi
+      else
+        if [[ "$away_since" -le 0 ]]; then
+          away_since="$now"
+          log "检测到离开（${reason:-unknown}），未满$(debounce_minutes)分钟回来则继续计时"
+          ticks_locked=0
+        fi
+        if away_long_enough "$away_since" "$now"; then
+          log "离开已满$(debounce_minutes)分钟，计时已重置"
+          unlocked_since=0
+          last_unlocked=false
+          away_since=0
+          ticks_unlocked=0
+          ticks_locked=1
+          write_state "locked" 0 0 "${reason:-locked}"
+          log "仍判定为离开，不计时（原因=${reason:-unknown}）。若你正在用电脑，请运行 standup-reminder doctor"
+        else
+          last_unlocked=true
+          elapsed=$((now - unlocked_since))
+          write_state "unlocked" "$unlocked_since" "$elapsed" "away_pending"
+          ticks_unlocked=$((ticks_unlocked + 1))
+          if ((ticks_unlocked % HEARTBEAT_EVERY == 0)); then
+            local remain=$((REMINDER_INTERVAL - elapsed))
+            [[ "$remain" -lt 0 ]] && remain=0
+            log "计时中（短暂离开）：已连续使用 $((elapsed / 60)) 分钟，约 $((remain / 60)) 分钟后提醒"
+          fi
+        fi
       fi
     fi
 
+    last_loop_now="$now"
     /bin/sleep "$POLL_SECONDS" &
     wait $!
   done
@@ -694,6 +744,14 @@ case "${1:-start}" in
       exit 0
     fi
     printf 'locked\n'
+    exit 1
+    ;;
+  __away-long-enough)
+    if away_long_enough "${2-}" "${3-}"; then
+      printf 'reset\n'
+      exit 0
+    fi
+    printf 'hold\n'
     exit 1
     ;;
   *)
