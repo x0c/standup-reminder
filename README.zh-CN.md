@@ -39,6 +39,8 @@ curl -fsSL https://raw.githubusercontent.com/x0c/standup-reminder/main/install.s
 standup-reminder status     # 在不在跑、在不在计时、还有多久提醒
 standup-reminder doctor     # 装了但不响，先跑这条
 standup-reminder now        # 立刻试响一次
+standup-reminder config     # 查看间隔、文案、到点动作
+standup-reminder config set interval 80m   # 改成 80 分钟提醒一次
 standup-reminder stop       # 停掉并取消登录自启
 standup-reminder --dry-run  # 只记日志，不藏窗口 / 不弹窗 / 不启屏保
 standup-reminder --help
@@ -48,24 +50,30 @@ standup-reminder --help
 
 ## 配置
 
-用环境变量。Homebrew：改服务配置。安装脚本：改 `~/Library/LaunchAgents/io.github.x0c.standup-reminder.plist` 里的环境变量。
-
-| 变量 | 默认 | 含义 |
-|---|---|---|
-| `REMINDER_INTERVAL` | `2700`（45 分钟；安装/brew 默认 `3600`） | 连续解锁使用多久后提醒 |
-| `REMINDER_MESSAGE` | `起身走动一下~` | 弹窗文案 |
-| `AWAY_DEBOUNCE_SECONDS` | `180`（3 分钟） | 离开多久才清零。未满又回来则接着计 |
-| `STATE_DIR` | `~/Library/Application Support/standup-reminder` | 状态与日志目录 |
-| `LOG_FILE` | `$STATE_DIR/run.log` | 日志路径 |
-| `STANDUP_DRY_RUN` | `0` | `1` = 只记日志 |
-
-改完登录项文件后重新加载，并再跑一次自检：
+用命令改，最多约 10 秒后生效，不用改登录项、不用重装。
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/io.github.x0c.standup-reminder.plist
-launchctl load   ~/Library/LaunchAgents/io.github.x0c.standup-reminder.plist
-standup-reminder doctor
+standup-reminder config
+standup-reminder config set interval 80m
+standup-reminder config set away_reset 3m
+standup-reminder config set message "起身走动一下~"
+standup-reminder config set hide_windows false
+standup-reminder config unset interval    # 该项回到默认
 ```
+
+`status` / `doctor` / `config` 都支持 `--json`。`config set --dry-run` 只预览不写盘。
+
+| 项 | 默认 | 含义 |
+|---|---|---|
+| `interval` | 60 分钟 | 连续解锁使用多久后提醒。裸数字按分钟。也接受 `80m` / `1h20m` |
+| `away_reset` | 3 分钟 | 离开多久才清零。未满又回来则接着计 |
+| `message` / `title` / `button` | 随系统语言 | 弹窗正文、标题、按钮 |
+| `hide_windows` | true | 到点是否藏窗口 |
+| `show_dialog` | true | 到点是否弹窗 |
+| `start_screensaver` | true | 到点是否开屏保 |
+| `dialog_timeout` | 30 秒 | 弹窗无人点时等多久自动关掉。裸数字按秒 |
+
+查看配置文件路径：`standup-reminder config path`。覆盖安装会保留已有配置。
 
 ## 怎么计时
 
@@ -75,7 +83,7 @@ standup-reminder doctor
 2. 会话状态看不清 → **按正在使用处理**。提醒工具不能因为前台应用名解析失败就永远不响。
 3. 离开未满 3 分钟又回来 → **接着计**（离开那段也算坐着）。满 3 分钟才清零。
 4. 休眠把进程冻住超过 3 分钟 → 醒来后从零计，避免把睡着的几小时算进去。
-5. 连续坐满设定时长：藏窗口、弹提示、开屏保，然后重新计时。
+5. 连续坐满设定时长：按配置藏窗口、弹提示、开屏保，然后重新计时。三项打断都可以单独关掉。
 
 ## 装了但从不提醒
 

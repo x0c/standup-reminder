@@ -71,6 +71,7 @@ if current:
         sys.exit(0)
 text = re.sub(r'url "https://github.com/.*/archive/refs/tags/v[^"]+"', f'url "{url}"', text, count=1)
 text = re.sub(r'^  sha256 ".*"', f'  sha256 "{sha}"', text, count=1, flags=re.M)
+text = re.sub(r'\n  environment_variables REMINDER_INTERVAL: "[^"]+"', "", text, count=1)
 open(path, "w", encoding="utf-8").write(text)
 print("已写入配方")
 PY

@@ -67,7 +67,8 @@ graph TD
 |---|---|---|---|
 | 本机安装 | `./install.sh` | `do_install` / `wait_until_counting` | 等到 `doctor` 成功 |
 | 卸载 | `./install.sh --uninstall` | `do_uninstall` | 状态目录默认保留 |
-| 登录项模板 | `com.github.x0c.standup-reminder.plist` | 标签 `io.github.x0c.standup-reminder` | 安装时替换可执行文件与状态目录占位符 |
+| 登录项模板 | `com.github.x0c.standup-reminder.plist` | 标签 `io.github.x0c.standup-reminder` | 安装时替换可执行文件与状态目录占位符。**禁止**再写入提醒间隔环境变量 |
+| 用户配置 | `$STATE_DIR/config` | 命令 `config get/set/unset` | 覆盖安装须保留已有配置；若无配置文件则把旧登录项里的间隔迁过去 |
 | 自检 | `standup-reminder doctor` | `cmd_doctor` | 退出码 0 才算健康 |
 | 进度 | `standup-reminder status` | `cmd_status` | 未运行退出码 1 |
 | 停止 | `standup-reminder stop` | `cmd_stop` / `unload_service` | 卸登录项 + brew 服务 |
@@ -82,7 +83,7 @@ graph TD
 |---|---|---|
 | `~/.local/bin/standup-reminder` | 安装脚本放入的可执行文件 | 改源码后必须再跑安装脚本才生效 |
 | `~/Library/LaunchAgents/io.github.x0c.standup-reminder.plist` | 登录项 | 与 brew 服务不要并存 |
-| `~/Library/Application Support/standup-reminder/` | 状态、PID、日志 | `doctor` / `status` 读这里 |
+| `~/Library/Application Support/standup-reminder/` | 状态、PID、日志、**配置文件** | 覆盖安装保留 `config`；`doctor` / `status` 读状态文件 |
 
 ## §5 本域流程 / 组件 / 任务入口索引
 
@@ -98,6 +99,7 @@ graph TD
 - **AI 易错点** 【禁止】`stop` 只杀进程不卸登录项 -> 保活会立刻拉回来。
 - **AI 易错点** 【禁止】本机发版后只推 GitHub、不跑安装脚本 -> 机主仍在跑旧文件。
 - 【禁止】Homebrew 与安装脚本两套常驻同时开。`doctor` 会提示，必须只留一套。本机约定留安装脚本。
+- 【禁止】登录项或 Homebrew 服务写死 `REMINDER_INTERVAL`。发版脚本必须把配方里这类行剥掉。否则 `config set` 改了文件，后台仍用旧间隔。
 - 【禁止】发版把 Homebrew 配方写成比现网更旧的版本。
 - 【隐性依赖】提交信息若被工具加上 AI 署名，推送前必须去掉；`git commit --amend` 可能再次注入，需改用无署名的提交对象后再推。
 - 【叫法统一】正文用「常驻 / 自检 / 本机安装」；对外 README 仍写 Homebrew 为推荐渠道。

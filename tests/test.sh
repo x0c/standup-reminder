@@ -18,7 +18,7 @@ ver="$("$BIN" --version)"
 pass "version ($ver)"
 
 help="$("$BIN" --help)"
-[[ "$help" == *doctor* && "$help" == *now* ]] || fail "help 缺少 doctor/now"
+[[ "$help" == *doctor* && "$help" == *now* && "$help" == *config* ]] || fail "help 缺少 doctor/now/config"
 pass "help"
 
 set +e
@@ -109,5 +109,68 @@ zero_code=$?
 set -e
 [[ "$zero_code" == "1" && "$zero_out" == hold ]] || fail "未进入离开不应清零: [$zero_out] $zero_code"
 pass "尚未离开不清零"
+
+# --- 配置 ---
+cfg_json="$("$BIN" config get interval --json)"
+echo "$cfg_json" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True; assert d["data"]["key"]=="interval"; assert d["data"]["value_seconds"]==3600; assert d["data"]["source"]=="default"'
+pass "默认间隔 60 分钟"
+
+[[ ! -f "$STATE_DIR/config" ]] || fail "未 set 前不应有配置文件"
+set +e
+dry_json="$("$BIN" config set interval 80m --dry-run --json)"
+dry_code=$?
+set -e
+[[ "$dry_code" == "0" ]] || fail "config set --dry-run 退出码 $dry_code"
+echo "$dry_json" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True; assert d["data"]["action"]=="would_update"'
+[[ ! -f "$STATE_DIR/config" ]] || fail "dry-run 不应写配置文件"
+pass "config set --dry-run 不写盘"
+
+set1="$("$BIN" config set interval 80m --json)"
+echo "$set1" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True; assert d["data"]["action"]=="updated"; assert d["data"]["items"][0]["value_seconds"]==4800'
+[[ -f "$STATE_DIR/config" ]] || fail "set 后应有配置文件"
+pass "config set interval 80m"
+
+set2="$("$BIN" config set interval 80 --json)"
+echo "$set2" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["data"]["action"]=="unchanged"'
+pass "同样的间隔第二次 set 为 unchanged"
+
+set3="$("$BIN" config set interval 1h20m --json)"
+echo "$set3" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["data"]["items"][0]["value_seconds"]==4800; assert d["data"]["action"]=="unchanged"'
+pass "1h20m 与 80 分钟相同"
+
+got="$("$BIN" config get interval --json)"
+echo "$got" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["data"]["value"]=="80m"; assert d["data"]["source"]=="file"'
+pass "config get 读到文件中的 80 分钟"
+
+bool_set="$("$BIN" config set hide_windows false --json)"
+echo "$bool_set" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["data"]["items"][0]["value_bool"] is False'
+pass "config set hide_windows false"
+
+env_json="$(REMINDER_INTERVAL=120 "$BIN" config get interval --json)"
+echo "$env_json" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["data"]["value_seconds"]==120; assert d["data"]["source"]=="env"'
+pass "环境变量覆盖配置文件"
+
+set +e
+bad="$("$BIN" config get not_a_key --json)"
+bad_code=$?
+set -e
+[[ "$bad_code" == "2" ]] || fail "未知配置项退出码应为 2，实际 $bad_code"
+echo "$bad" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is False; assert d["error"]["code"]'
+pass "未知配置项 --json envelope"
+
+set +e
+bad2="$("$BIN" config set interval 0 --json)"
+bad2_code=$?
+set -e
+[[ "$bad2_code" == "2" ]] || fail "过短间隔退出码应为 2，实际 $bad2_code"
+pass "间隔过短被拒绝"
+
+un="$("$BIN" config unset interval --json)"
+echo "$un" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["data"]["action"]=="updated"; assert d["data"]["items"][0]["source"]=="default"; assert d["data"]["items"][0]["value_seconds"]==3600'
+pass "config unset 回到默认 60 分钟"
+
+list="$("$BIN" config --json)"
+echo "$list" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); keys={i["key"] for i in d["data"]["items"]}; assert keys=={"interval","away_reset","message","title","button","hide_windows","show_dialog","start_screensaver","dialog_timeout"}'
+pass "config list 含全部项"
 
 pass "全部通过"

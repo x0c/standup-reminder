@@ -14,7 +14,16 @@
 ./install.sh
 STANDUP_FORCE_TEXT=1 ~/.local/bin/standup-reminder doctor
 STANDUP_FORCE_TEXT=1 ~/.local/bin/standup-reminder status
+STANDUP_FORCE_TEXT=1 ~/.local/bin/standup-reminder config
 ```
+
+改间隔（例如 80 分钟）不必重装：
+
+```bash
+~/.local/bin/standup-reminder config set interval 80m
+```
+
+最多约 10 秒后按新间隔计。禁止再改登录项里的环境变量。
 
 自检必须显示正在计时。非终端环境下默认可能打出 JSON，看人话时加上 `STANDUP_FORCE_TEXT=1`。
 

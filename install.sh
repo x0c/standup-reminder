@@ -64,9 +64,22 @@ install_binary() {
   chmod +x "$BIN_PATH"
 }
 
+migrate_interval_from_plist() {
+  # 旧版把间隔写在登录项环境变量里。升级时迁到配置文件，避免覆盖安装把自定义间隔冲掉。
+  [[ -f "$STATE_DIR/config" ]] && return 0
+  [[ -f "$PLIST_PATH" ]] || return 0
+  local old
+  old="$(/usr/bin/plutil -extract EnvironmentVariables.REMINDER_INTERVAL raw "$PLIST_PATH" 2>/dev/null || true)"
+  [[ "$old" =~ ^[1-9][0-9]*$ ]] || return 0
+  mkdir -p "$STATE_DIR"
+  printf 'interval=%ss\n' "$old" >"$STATE_DIR/config"
+  info "已把旧的提醒间隔（${old} 秒）迁到配置文件"
+}
+
 install_agent() {
   info "生成 launchd 配置 $PLIST_PATH"
-  mkdir -p "$(dirname "$PLIST_PATH")"
+  mkdir -p "$(dirname "$PLIST_PATH")" "$STATE_DIR"
+  migrate_interval_from_plist
 
   local template
   if [[ -f "$SCRIPT_DIR/com.github.x0c.standup-reminder.plist" ]]; then
@@ -110,15 +123,13 @@ do_install() {
   fi
   echo
   echo "常用命令:"
-  echo "  \"$BIN_PATH\" status     # 是否在计时、距下次提醒多久"
-  echo "  \"$BIN_PATH\" doctor     # 装了但不响时先跑这条"
-  echo "  \"$BIN_PATH\" now        # 立刻试响一次"
-  echo "  \"$BIN_PATH\" stop       # 停止并取消登录自启"
+  echo "  \"$BIN_PATH\" status              # 是否在计时、距下次提醒多久"
+  echo "  \"$BIN_PATH\" doctor              # 装了但不响时先跑这条"
+  echo "  \"$BIN_PATH\" now                 # 立刻试响一次"
+  echo "  \"$BIN_PATH\" config              # 查看配置"
+  echo "  \"$BIN_PATH\" config set interval 80m   # 改成 80 分钟提醒一次"
+  echo "  \"$BIN_PATH\" stop                # 停止并取消登录自启"
   echo "  tail -f \"$STATE_DIR/run.log\"  # 查看日志"
-  echo
-  echo "自定义提醒间隔（如改为 30 分钟）："
-  echo "  1) 编辑 $PLIST_PATH 中 REMINDER_INTERVAL 的值（单位：秒）"
-  echo "  2) launchctl unload \"$PLIST_PATH\" && launchctl load \"$PLIST_PATH\""
   echo
   echo "卸载: ./install.sh --uninstall"
 }

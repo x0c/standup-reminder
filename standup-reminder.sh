@@ -6,12 +6,18 @@ set -euo pipefail
 # - 超时后隐藏窗口、弹出提示、启动屏保
 # - 判断失败时按「正在使用」处理，避免静默从不提醒
 
-VERSION="0.2.2"
+VERSION="0.3.0"
 
-REMINDER_INTERVAL=${REMINDER_INTERVAL:-2700}
-REMINDER_MESSAGE=${REMINDER_MESSAGE:-"起身走动一下~"}
+# 显式传入的环境变量覆盖配置文件（测试 / 一次性演练）。未传则走配置文件或默认值。
+if [[ "${REMINDER_INTERVAL+x}" == "x" ]]; then SR_ENV_INTERVAL="$REMINDER_INTERVAL"; fi
+if [[ "${AWAY_DEBOUNCE_SECONDS+x}" == "x" ]]; then SR_ENV_AWAY="$AWAY_DEBOUNCE_SECONDS"; fi
+if [[ "${REMINDER_MESSAGE+x}" == "x" ]]; then SR_ENV_MESSAGE="$REMINDER_MESSAGE"; fi
+if [[ "${REMINDER_TITLE+x}" == "x" ]]; then SR_ENV_TITLE="$REMINDER_TITLE"; fi
+if [[ "${REMINDER_BUTTON+x}" == "x" ]]; then SR_ENV_BUTTON="$REMINDER_BUTTON"; fi
+
 STATE_DIR=${STATE_DIR:-"$HOME/Library/Application Support/standup-reminder"}
 LOG_FILE=${LOG_FILE:-"$STATE_DIR/run.log"}
+CONFIG_FILE="${STANDUP_CONFIG_FILE:-$STATE_DIR/config}"
 PID_FILE="$STATE_DIR/standup_reminder.pid"
 STATE_FILE="$STATE_DIR/state"
 LAUNCH_LABEL="io.github.x0c.standup-reminder"
@@ -24,8 +30,18 @@ POLL_SECONDS=10
 STATE_STALE_AFTER=30
 HEARTBEAT_EVERY=6
 LOCKED_HEARTBEAT_EVERY=60
-# 离开未满此时长又回来，视为没起身：接着计，离开那段也算坐着。
-AWAY_DEBOUNCE_SECONDS=${AWAY_DEBOUNCE_SECONDS:-180}
+
+# 下列由 load_effective_config 填入。未加载前给安全默认，避免帮助/解析类命令踩空。
+REMINDER_INTERVAL=3600
+REMINDER_MESSAGE="起身走动一下~"
+REMINDER_TITLE="久坐提醒"
+REMINDER_BUTTON="好的"
+AWAY_DEBOUNCE_SECONDS=180
+HIDE_WINDOWS=1
+SHOW_DIALOG=1
+START_SCREENSAVER=1
+DIALOG_TIMEOUT=30
+EFFECTIVE_STAMP=""
 
 usage() {
   cat <<EOF
@@ -37,22 +53,436 @@ standup-reminder $VERSION —— macOS 久坐提醒守护脚本
   standup-reminder doctor      自检：装上了但从不响，先跑这条
   standup-reminder now         立刻试响一次（确认弹窗/屏保真能出来）
   standup-reminder stop        停止守护进程并卸掉登录项
+  standup-reminder config      查看全部配置
+  standup-reminder config get <项>
+  standup-reminder config set <项> <值>
+  standup-reminder config unset <项>
+  standup-reminder config path
   standup-reminder --dry-run   以演练模式启动（只记日志，不弹窗/不启屏保）
-  standup-reminder --json      与 status / doctor 联用，输出机器可读结果
+  standup-reminder --json      与 status / doctor / config 联用，输出机器可读结果
   standup-reminder --help      显示本帮助
   standup-reminder --version   显示版本号
 
-环境变量:
-  REMINDER_INTERVAL         连续使用多久后提醒（秒），默认 2700（45 分钟）
-  REMINDER_MESSAGE          提醒弹窗文案，默认 "起身走动一下~"
-  AWAY_DEBOUNCE_SECONDS     离开多久才清零（秒），默认 180。未满又回来则接着计
-  STATE_DIR                 状态与日志目录
-  LOG_FILE                  日志文件路径
-  STANDUP_DRY_RUN           置 1 时只记日志，不隐藏窗口/不弹提醒/不启屏保
+可配置项:
+  interval             连续使用多久后提醒。裸数字按分钟。默认 60m。例: 80、80m、1h20m
+  away_reset           离开多久才清零。裸数字按分钟。默认 3m。未满又回来则接着计
+  message              弹窗正文
+  title                弹窗标题
+  button               弹窗按钮
+  hide_windows         到点是否藏窗口（true/false）
+  show_dialog          到点是否弹窗
+  start_screensaver    到点是否开屏保
+  dialog_timeout       弹窗无人点时等多久自动关掉。裸数字按秒。默认 30s
+
+改配置会写入配置文件，后台最多一轮（约 10 秒）后按新值计。不必改登录项。
+config set 可加 --dry-run 只预览不写盘。
 
 日志:
   tail -f "$LOG_FILE"
 EOF
+}
+
+config_py() {
+  CONFIG_FILE="$CONFIG_FILE" \
+  SR_ENV_INTERVAL="${SR_ENV_INTERVAL-}" \
+  SR_ENV_AWAY="${SR_ENV_AWAY-}" \
+  SR_ENV_MESSAGE="${SR_ENV_MESSAGE-}" \
+  SR_ENV_TITLE="${SR_ENV_TITLE-}" \
+  SR_ENV_BUTTON="${SR_ENV_BUTTON-}" \
+  /usr/bin/python3 - "$@" <<'PY'
+import json, os, re, shlex, subprocess, sys
+
+FILE = os.environ.get("CONFIG_FILE", "")
+ENV = {
+    "interval": os.environ.get("SR_ENV_INTERVAL"),
+    "away_reset": os.environ.get("SR_ENV_AWAY"),
+    "message": os.environ.get("SR_ENV_MESSAGE"),
+    "title": os.environ.get("SR_ENV_TITLE"),
+    "button": os.environ.get("SR_ENV_BUTTON"),
+}
+
+def is_zh():
+    for key in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        if os.environ.get(key, "").lower().startswith("zh"):
+            return True
+    try:
+        out = subprocess.check_output(
+            ["/usr/bin/defaults", "read", "-g", "AppleLocale"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+        return out.lower().startswith("zh")
+    except Exception:
+        return False
+
+ZH = is_zh()
+
+def loc_default(zh, en):
+    return zh if ZH else en
+
+KEYS = {
+    "interval": {
+        "type": "duration", "default": "60m", "bare": "m", "min": 60, "max": 86400,
+        "env_as": "seconds",
+        "desc": "连续使用多久后提醒",
+    },
+    "away_reset": {
+        "type": "duration", "default": "3m", "bare": "m", "min": 0, "max": 3600,
+        "env_as": "seconds",
+        "desc": "离开多久才清零；未满又回来则接着计",
+    },
+    "message": {"type": "string", "desc": "弹窗正文"},
+    "title": {"type": "string", "desc": "弹窗标题"},
+    "button": {"type": "string", "desc": "弹窗按钮"},
+    "hide_windows": {"type": "bool", "default": True, "desc": "到点是否藏窗口"},
+    "show_dialog": {"type": "bool", "default": True, "desc": "到点是否弹窗"},
+    "start_screensaver": {"type": "bool", "default": True, "desc": "到点是否开屏保"},
+    "dialog_timeout": {
+        "type": "duration", "default": "30s", "bare": "s", "min": 5, "max": 300,
+        "desc": "弹窗无人点时等多久自动关掉",
+    },
+}
+
+UNIT = {"s": 1, "sec": 1, "second": 1, "seconds": 1,
+        "m": 60, "min": 60, "minute": 60, "minutes": 60,
+        "h": 3600, "hr": 3600, "hour": 3600, "hours": 3600}
+
+def string_default(key):
+    if key == "message":
+        return loc_default("起身走动一下~", "Time to stand up and walk around")
+    if key == "title":
+        return loc_default("久坐提醒", "Stand up")
+    if key == "button":
+        return loc_default("好的", "OK")
+    return KEYS[key].get("default")
+
+def parse_duration(text, bare):
+    raw = str(text).strip().lower().replace(" ", "")
+    if not raw:
+        raise ValueError("时长不能为空")
+    if re.fullmatch(r"\d+", raw):
+        return int(raw) * UNIT[bare]
+    total = 0
+    pos = 0
+    for m in re.finditer(r"(\d+)(hours|hour|hrs|hr|h|minutes|minute|mins|min|m|seconds|second|secs|sec|s)", raw):
+        if m.start() != pos:
+            raise ValueError("无法解析时长: %s" % text)
+        n = int(m.group(1))
+        u = m.group(2)
+        if u in ("h", "hr", "hrs", "hour", "hours"):
+            total += n * 3600
+        elif u in ("m", "min", "mins", "minute", "minutes"):
+            total += n * 60
+        else:
+            total += n
+        pos = m.end()
+    if pos != len(raw) or pos == 0:
+        raise ValueError("无法解析时长: %s" % text)
+    return total
+
+def format_duration(seconds):
+    seconds = int(seconds)
+    if seconds % 3600 == 0 and seconds >= 7200:
+        return "%dh" % (seconds // 3600)
+    if seconds % 60 == 0:
+        return "%dm" % (seconds // 60)
+    return "%ds" % seconds
+
+def human_duration(seconds):
+    seconds = int(seconds)
+    if seconds % 3600 == 0 and seconds >= 7200:
+        return "%d 小时" % (seconds // 3600)
+    if seconds >= 60 and seconds % 60 == 0:
+        return "%d 分钟" % (seconds // 60)
+    if seconds >= 60:
+        return "%d 分 %d 秒" % (seconds // 60, seconds % 60)
+    return "%d 秒" % seconds
+
+def parse_bool(text):
+    v = str(text).strip().lower()
+    if v in ("1", "true", "yes", "on", "y"):
+        return True
+    if v in ("0", "false", "no", "off", "n"):
+        return False
+    raise ValueError("布尔值请用 true/false")
+
+def canonical(key, value):
+    spec = KEYS[key]
+    t = spec["type"]
+    if t == "duration":
+        sec = parse_duration(value, spec["bare"])
+        if sec < spec["min"] or sec > spec["max"]:
+            raise ValueError("%s 允许范围是 %s–%s" % (
+                key, format_duration(spec["min"]), format_duration(spec["max"])))
+        return format_duration(sec), sec
+    if t == "bool":
+        b = parse_bool(value)
+        return ("true" if b else "false"), b
+    s = str(value)
+    if not s.strip():
+        raise ValueError("%s 不能为空" % key)
+    if "\n" in s or "\r" in s:
+        raise ValueError("%s 不能换行" % key)
+    return s, s
+
+def default_canon(key):
+    spec = KEYS[key]
+    if spec["type"] == "string":
+        v = string_default(key)
+        return v, v
+    return canonical(key, spec["default"])
+
+def read_file():
+    out = {}
+    if not FILE or not os.path.isfile(FILE):
+        return out
+    with open(FILE, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            raw = line.strip()
+            if not raw or raw.startswith("#"):
+                continue
+            if "=" not in raw:
+                raise ValueError("配置第 %d 行缺少 =: %s" % (lineno, raw))
+            k, v = raw.split("=", 1)
+            k = k.strip()
+            if k not in KEYS:
+                raise ValueError("配置第 %d 行未知项: %s" % (lineno, k))
+            out[k] = v
+    return out
+
+def write_file(data):
+    os.makedirs(os.path.dirname(FILE) or ".", exist_ok=True)
+    tmp = FILE + ".tmp"
+    lines = ["# standup-reminder 配置。请用 standup-reminder config set 修改。"]
+    for k in KEYS:
+        if k in data:
+            lines.append("%s=%s" % (k, data[k]))
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, FILE)
+
+def env_raw(key):
+    v = ENV.get(key)
+    if v is None or v == "":
+        return None
+    return v
+
+def resolve(key, filemap):
+    spec = KEYS[key]
+    ev = env_raw(key)
+    if ev is not None:
+        if spec.get("env_as") == "seconds" and re.fullmatch(r"\d+", ev):
+            canon, inner = format_duration(int(ev)), int(ev)
+        else:
+            canon, inner = canonical(key, ev)
+        return canon, inner, "env"
+    if key in filemap:
+        canon, inner = canonical(key, filemap[key])
+        return canon, inner, "file"
+    canon, inner = default_canon(key)
+    return canon, inner, "default"
+
+SOURCE_TAG = {"env": "环境变量", "file": "配置文件", "default": "默认值"}
+
+def item(key, filemap):
+    spec = KEYS[key]
+    canon, inner, source = resolve(key, filemap)
+    rec = {
+        "key": key,
+        "value": canon,
+        "source": source,
+        "source_tag": SOURCE_TAG[source],
+        "description": spec["desc"],
+        "type": spec["type"],
+    }
+    if spec["type"] == "duration":
+        rec["value_seconds"] = int(inner)
+        rec["value_tag"] = human_duration(inner)
+        rec["default"] = spec["default"]
+    elif spec["type"] == "bool":
+        rec["value_bool"] = bool(inner)
+        rec["value_tag"] = "是" if inner else "否"
+        rec["default"] = "true" if spec["default"] else "false"
+    else:
+        rec["value_tag"] = canon
+        rec["default"] = string_default(key)
+    return rec, inner
+
+def fail(code, msg):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+def cmd_export():
+    filemap = read_file()
+    vals = {}
+    stamp_parts = []
+    for key in KEYS:
+        rec, inner = item(key, filemap)
+        vals[key] = inner
+        stamp_parts.append("%s=%s" % (key, rec["value"]))
+    assigns = {
+        "REMINDER_INTERVAL": str(vals["interval"]),
+        "AWAY_DEBOUNCE_SECONDS": str(vals["away_reset"]),
+        "REMINDER_MESSAGE": str(vals["message"]),
+        "REMINDER_TITLE": str(vals["title"]),
+        "REMINDER_BUTTON": str(vals["button"]),
+        "HIDE_WINDOWS": "1" if vals["hide_windows"] else "0",
+        "SHOW_DIALOG": "1" if vals["show_dialog"] else "0",
+        "START_SCREENSAVER": "1" if vals["start_screensaver"] else "0",
+        "DIALOG_TIMEOUT": str(vals["dialog_timeout"]),
+        "EFFECTIVE_STAMP": "|".join(stamp_parts),
+    }
+    for k, v in assigns.items():
+        print("%s=%s" % (k, shlex.quote(v)))
+
+def cmd_list():
+    filemap = read_file()
+    items = [item(k, filemap)[0] for k in KEYS]
+    json.dump({"path": FILE, "items": items}, sys.stdout, ensure_ascii=False)
+    print()
+
+def cmd_get(key):
+    if key not in KEYS:
+        fail(2, "未知配置项: %s" % key)
+    rec, _ = item(key, read_file())
+    json.dump(rec, sys.stdout, ensure_ascii=False)
+    print()
+
+def parse_pairs(args):
+    pairs = []
+    if len(args) == 2 and "=" not in args[0]:
+        pairs.append((args[0], args[1]))
+        return pairs
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if "=" in a:
+            k, v = a.split("=", 1)
+            pairs.append((k, v))
+            i += 1
+        elif i + 1 < len(args) and "=" not in args[i + 1]:
+            pairs.append((a, args[i + 1]))
+            i += 2
+        else:
+            fail(2, "用法: config set <项> <值>")
+    return pairs
+
+def cmd_set(args, dry):
+    if not args:
+        fail(2, "用法: config set <项> <值>")
+    pairs = parse_pairs(args)
+    filemap = read_file()
+    previous = dict(filemap)
+    changed = []
+    for k, v in pairs:
+        if k not in KEYS:
+            fail(2, "未知配置项: %s" % k)
+        try:
+            canon, _ = canonical(k, v)
+        except ValueError as e:
+            fail(2, str(e))
+        old = filemap.get(k)
+        filemap[k] = canon
+        rec, _ = item(k, filemap)
+        rec["previous"] = old
+        rec["changed"] = old != canon
+        changed.append(rec)
+    any_change = any(r["changed"] or r["key"] not in previous for r in changed)
+    # 第一次写入默认值也算 applied
+    first = not os.path.isfile(FILE)
+    if not dry and (any_change or first):
+        write_file(filemap)
+    action = "unchanged"
+    if dry:
+        action = "would_update" if (any_change or first) else "unchanged"
+    elif any_change or first:
+        action = "updated"
+    json.dump({
+        "path": FILE,
+        "dry_run": dry,
+        "action": action,
+        "changed": action in ("updated", "would_update"),
+        "items": changed,
+    }, sys.stdout, ensure_ascii=False)
+    print()
+
+def cmd_unset(key, dry):
+    if key not in KEYS:
+        fail(2, "未知配置项: %s" % key)
+    filemap = read_file()
+    existed = key in filemap
+    if existed:
+        del filemap[key]
+    rec, _ = item(key, filemap)
+    rec["changed"] = existed
+    action = "unchanged"
+    if dry:
+        action = "would_update" if existed else "unchanged"
+    elif existed:
+        write_file(filemap)
+        action = "updated"
+    json.dump({
+        "path": FILE,
+        "dry_run": dry,
+        "action": action,
+        "changed": action in ("updated", "would_update"),
+        "items": [rec],
+    }, sys.stdout, ensure_ascii=False)
+    print()
+
+argv = sys.argv[1:]
+if not argv:
+    fail(2, "config 内部参数缺失")
+op = argv[0]
+try:
+    if op == "export":
+        cmd_export()
+    elif op == "list":
+        cmd_list()
+    elif op == "get":
+        if len(argv) < 2:
+            fail(2, "用法: config get <项>")
+        cmd_get(argv[1])
+    elif op == "set":
+        dry = os.environ.get("SR_CONFIG_DRY", "0") == "1"
+        cmd_set(argv[1:], dry)
+    elif op == "unset":
+        dry = os.environ.get("SR_CONFIG_DRY", "0") == "1"
+        if len(argv) < 2:
+            fail(2, "用法: config unset <项>")
+        cmd_unset(argv[1], dry)
+    elif op == "keys":
+        print("\n".join(KEYS))
+    else:
+        fail(2, "未知配置内部命令: %s" % op)
+except ValueError as e:
+    fail(2, str(e))
+PY
+}
+
+load_effective_config() {
+  local exported
+  exported="$(config_py export)"
+  eval "$exported"
+}
+
+config_py_ok() {
+  local err rc
+  err="$(/usr/bin/mktemp -t standup-cfg-err)"
+  set +e
+  _CFG_OUT="$(config_py "$@" 2>"$err")"
+  rc=$?
+  set -e
+  if [[ "$rc" != "0" ]]; then
+    print_human_or_json 0 "invalid_config" "$(/usr/bin/tr '\n' ' ' <"$err")" "null" || true
+    rm -f "$err"
+    return "$rc"
+  fi
+  rm -f "$err"
+  return 0
+}
+
+applescript_quote() {
+  /usr/bin/python3 -c 'import sys; s=sys.argv[1]; print("\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")' "$1"
 }
 
 log() {
@@ -252,6 +682,10 @@ brew_service_listed() {
 }
 
 hide_all_windows() {
+  if [[ "$HIDE_WINDOWS" != "1" ]]; then
+    log "已配置不隐藏窗口"
+    return 0
+  fi
   if [[ "$STANDUP_DRY_RUN" == "1" ]]; then
     log "DRY_RUN=1，仅记录日志，不隐藏窗口"
     return 0
@@ -268,22 +702,33 @@ hide_all_windows() {
 }
 
 show_reminder() {
+  if [[ "$SHOW_DIALOG" != "1" ]]; then
+    log "已配置不弹窗"
+    return 0
+  fi
   if [[ "$STANDUP_DRY_RUN" == "1" ]]; then
     log "DRY_RUN=1，仅记录日志，不显示提醒"
     return 0
   fi
 
-  local user uid
+  local user uid msg title btn
   user="$(console_user)"
   uid="$(/usr/bin/id -u "$user" 2>/dev/null || true)"
   [[ -n "$uid" ]] || return 1
 
-  /bin/launchctl asuser "$uid" /usr/bin/osascript -e "display dialog \"$REMINDER_MESSAGE\" buttons {\"好的\"} default button \"好的\" with title \"久坐提醒\" giving up after 30" 2>&1 | while read -r line; do
+  msg="$(applescript_quote "$REMINDER_MESSAGE")"
+  title="$(applescript_quote "$REMINDER_TITLE")"
+  btn="$(applescript_quote "$REMINDER_BUTTON")"
+  /bin/launchctl asuser "$uid" /usr/bin/osascript -e "display dialog $msg buttons {$btn} default button $btn with title $title giving up after $DIALOG_TIMEOUT" 2>&1 | while read -r line; do
     [[ -n "$line" ]] && log "显示提醒：$line"
   done
 }
 
 start_screensaver() {
+  if [[ "$START_SCREENSAVER" != "1" ]]; then
+    log "已配置不启动屏保"
+    return 0
+  fi
   if [[ "$STANDUP_DRY_RUN" == "1" ]]; then
     log "DRY_RUN=1，仅记录日志，不启动屏保"
     return 0
@@ -336,6 +781,124 @@ acquire_single_instance() {
 
   trap cleanup EXIT
   trap 'cleanup; exit 0' INT TERM
+}
+
+cmd_config() {
+  local sub="${1:-list}"
+  shift || true
+  case "$sub" in
+    list|"")
+      cmd_config_list
+      ;;
+    get)
+      cmd_config_get "${1-}"
+      ;;
+    set)
+      cmd_config_set "$@"
+      ;;
+    unset)
+      cmd_config_unset "${1-}"
+      ;;
+    path)
+      cmd_config_path
+      ;;
+    *)
+      local keys
+      keys="$(config_py keys)"
+      if printf '%s\n' "$keys" | /usr/bin/grep -qx -- "$sub"; then
+        if [[ $# -eq 0 ]]; then
+          cmd_config_get "$sub"
+        else
+          cmd_config_set "$sub" "$@"
+        fi
+      else
+        print_human_or_json 0 "unknown_command" "未知命令: config $sub" "null" || true
+        return 2
+      fi
+      ;;
+  esac
+}
+
+cmd_config_path() {
+  local data
+  data="$(P="$CONFIG_FILE" /usr/bin/python3 -c 'import json,os; print(json.dumps({"path": os.environ["P"]}, ensure_ascii=False))')"
+  print_human_or_json 1 "" "$CONFIG_FILE" "$data"
+}
+
+cmd_config_list() {
+  local payload msg
+  config_py_ok list || return $?
+  payload="$_CFG_OUT"
+  msg="$(printf '%s' "$payload" | /usr/bin/python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("配置文件: " + d.get("path",""))
+for it in d["items"]:
+    extra = ""
+    if it["source"] != "default":
+        extra = "（%s）" % it["source_tag"]
+    print("- %s: %s%s" % (it["key"], it["value_tag"], extra))
+    print("    %s" % it["description"])
+')"
+  print_human_or_json 1 "" "$msg" "$payload"
+}
+
+cmd_config_get() {
+  local key="${1-}" rec msg
+  if [[ -z "$key" ]]; then
+    print_human_or_json 0 "usage" "用法: standup-reminder config get <项>" "null" || true
+    return 2
+  fi
+  config_py_ok get "$key" || return $?
+  rec="$_CFG_OUT"
+  msg="$(printf '%s' "$rec" | /usr/bin/python3 -c '
+import json,sys
+it=json.load(sys.stdin)
+print("%s=%s（%s，来源：%s）" % (it["key"], it["value"], it["value_tag"], it["source_tag"]))
+')"
+  print_human_or_json 1 "" "$msg" "$rec"
+}
+
+cmd_config_human_set() {
+  /usr/bin/python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+action=d.get("action","")
+if action=="unchanged":
+    print("配置未变化")
+elif action=="would_update":
+    print("演练：将写入下列配置（未真正保存）")
+else:
+    print("已保存，后台最多约 10 秒后按新值计")
+for it in d.get("items") or []:
+    print("- %s=%s（%s）" % (it["key"], it["value"], it["value_tag"]))
+'
+}
+
+cmd_config_set() {
+  local payload msg
+  if [[ "$STANDUP_DRY_RUN" == "1" ]]; then
+    export SR_CONFIG_DRY=1
+  fi
+  config_py_ok set "$@" || return $?
+  payload="$_CFG_OUT"
+  msg="$(printf '%s' "$payload" | cmd_config_human_set)"
+  print_human_or_json 1 "" "$msg" "$payload"
+}
+
+cmd_config_unset() {
+  local key="${1-}" payload msg
+  if [[ -z "$key" ]]; then
+    print_human_or_json 0 "usage" "用法: standup-reminder config unset <项>" "null" || true
+    return 2
+  fi
+  if [[ "$STANDUP_DRY_RUN" == "1" ]]; then
+    export SR_CONFIG_DRY=1
+  fi
+  config_py_ok unset "$key" || return $?
+  payload="$_CFG_OUT"
+  msg="$(printf '%s' "$payload" | cmd_config_human_set)"
+  print_human_or_json 1 "" "$msg" "$payload"
 }
 
 status_data_json() {
@@ -566,9 +1129,18 @@ cmd_now() {
   fi
 }
 
+apply_config_if_changed() {
+  local prev="$EFFECTIVE_STAMP"
+  load_effective_config
+  if [[ -n "$prev" && "$EFFECTIVE_STAMP" != "$prev" ]]; then
+    log "配置已更新：间隔=$((REMINDER_INTERVAL / 60))分钟，离开满$((AWAY_DEBOUNCE_SECONDS / 60))分钟才清零，提示=\"$REMINDER_MESSAGE\""
+  fi
+}
+
 run_daemon() {
   require_macos || exit 1
   acquire_single_instance
+  load_effective_config
   log "启动 (提醒间隔=${REMINDER_INTERVAL}秒, 离开防抖=${AWAY_DEBOUNCE_SECONDS}秒, 提示=\"$REMINDER_MESSAGE\", dry_run=${STANDUP_DRY_RUN})"
 
   local unlocked_since=0 last_unlocked=false last_wake="" now elapsed reason
@@ -577,6 +1149,7 @@ run_daemon() {
   last_loop_now="$(/bin/date +%s)"
 
   while true; do
+    apply_config_if_changed
     now="$(/bin/date +%s)"
     local wake
     wake="$(wake_sec)"
@@ -712,6 +1285,12 @@ done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 case "${1:-start}" in
+  start|status|doctor|now|test|--test|stop|config|__away-long-enough)
+    load_effective_config
+    ;;
+esac
+
+case "${1:-start}" in
   start|"")
     run_daemon
     ;;
@@ -726,6 +1305,10 @@ case "${1:-start}" in
     ;;
   stop)
     cmd_stop
+    ;;
+  config)
+    shift
+    cmd_config "$@"
     ;;
   __parse-front)
     cmd_parse_front "${2-}"

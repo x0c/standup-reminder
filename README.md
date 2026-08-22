@@ -39,6 +39,8 @@ The installer copies the script, registers a login item, waits until timing has 
 standup-reminder status     # running? counting? minutes until the next nudge
 standup-reminder doctor     # why it might be silent — run this first
 standup-reminder now        # fire one reminder right now
+standup-reminder config     # show interval, copy, and what happens at fire time
+standup-reminder config set interval 80m   # remind every 80 minutes
 standup-reminder stop       # stop it and disable start-at-login
 standup-reminder --dry-run  # run the loop but do not hide windows / dialog / screensaver
 standup-reminder --help
@@ -48,24 +50,30 @@ standup-reminder --help
 
 ## Configuration
 
-Set these as environment variables. Homebrew: `brew services` / the formula service block. Installer: `EnvironmentVariables` in `~/Library/LaunchAgents/io.github.x0c.standup-reminder.plist`.
-
-| Variable            | Default                                              | Description |
-|---------------------|------------------------------------------------------|-------------|
-| `REMINDER_INTERVAL` | `2700` (45 min; installer/brew default `3600`)       | Continuous unlocked use before a reminder. |
-| `REMINDER_MESSAGE`  | `起身走动一下~`                                       | Dialog text. |
-| `AWAY_DEBOUNCE_SECONDS` | `180` (3 min)                                    | Leave this long before the timer resets. Come back sooner and it keeps counting. |
-| `STATE_DIR`         | `~/Library/Application Support/standup-reminder`     | PID, state, logs. |
-| `LOG_FILE`          | `$STATE_DIR/run.log`                                 | Log file. |
-| `STANDUP_DRY_RUN`   | `0`                                                  | `1` = log only. |
-
-Reload after editing the login-item file:
+Change settings with commands. They take effect within about 10 seconds. You do not need to edit the login item or reinstall.
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/io.github.x0c.standup-reminder.plist
-launchctl load   ~/Library/LaunchAgents/io.github.x0c.standup-reminder.plist
-standup-reminder doctor
+standup-reminder config
+standup-reminder config set interval 80m
+standup-reminder config set away_reset 3m
+standup-reminder config set message "Time to stand up and walk around"
+standup-reminder config set hide_windows false
+standup-reminder config unset interval    # revert that key to the default
 ```
+
+`status` / `doctor` / `config` accept `--json`. `config set --dry-run` previews without writing.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `interval` | 60 minutes | Continuous unlocked use before a reminder. A bare number is minutes. Also accepts `80m` / `1h20m`. |
+| `away_reset` | 3 minutes | How long you must be away before the timer resets. Come back sooner and it keeps counting. |
+| `message` / `title` / `button` | follows system language | Dialog text, title, and button |
+| `hide_windows` | true | Hide windows when the reminder fires |
+| `show_dialog` | true | Show the dialog |
+| `start_screensaver` | true | Start the screensaver |
+| `dialog_timeout` | 30 seconds | Auto-dismiss the dialog if nobody clicks. A bare number is seconds. |
+
+`standup-reminder config path` prints the config file path. Reinstalling keeps an existing config.
 
 ## How it works
 
@@ -73,9 +81,9 @@ Every 10 seconds the daemon:
 
 1. Treats screensaver, lock screen, or a logged-out console as **away**.
 2. Treats an ambiguous session as **in use** (fail-open). A reminder tool must not stay silent because a front-app name parse failed.
-3. **Does not reset** until you have been away for `AWAY_DEBOUNCE_SECONDS` (default 3 minutes). Come back sooner and the same sitting stretch continues, including those minutes.
+3. **Does not reset** until you have been away for the configured leave window (default 3 minutes). Come back sooner and the same sitting stretch continues, including those minutes.
 4. After a long sleep (the process was frozen longer than the debounce), starts a fresh interval so hours asleep are not dumped into the next nudge.
-5. After `REMINDER_INTERVAL` of continuous sitting: hide windows, show the dialog, start the screensaver, then start a new interval.
+5. After the configured interval of continuous sitting: hide windows, show the dialog, start the screensaver (each step can be turned off), then start a new interval.
 
 ## If it never reminds you
 

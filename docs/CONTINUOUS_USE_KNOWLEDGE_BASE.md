@@ -75,9 +75,10 @@ stateDiagram-v2
 | 改系统锁屏识别 | 同上 | `ioreg_reports_locked` | 会话字典里出现 `CGSSessionScreenIsLocked` 才算锁屏；解锁时该键不存在 |
 | 改屏保识别（含热角） | 同上 | `screensaver_running` | 系统「屏保是否在跑」+ 进程名兜底；禁止只扫旧的 `ScreenSaverEngine` |
 | 改前台窗口名兼容 | 同上 | `parse_front_name` / `front_app_name` | 新旧两种输出都要认；解析失败不得当成离开 |
-| 改计时循环 / 间隔 | 同上 | `run_daemon`；环境变量 `REMINDER_INTERVAL` | 安装默认 3600 秒 |
-| 改离开防抖 | 同上 | `away_long_enough`；环境变量 `AWAY_DEBOUNCE_SECONDS`（默认 180） | 未满阈值回来必须接着计；离开那段也算坐着 |
-| 改到点打断 | 同上 | `fire_reminder` / `hide_all_windows` / `show_reminder` / `start_screensaver` | 演练模式只写日志；防抖离开期间不弹 |
+| 改计时循环 / 间隔 | 同上 | `run_daemon`；配置项 `interval`（命令 `config set`） | 默认 60 分钟；裸数字按分钟。登录项禁止写死间隔 |
+| 改离开防抖 | 同上 | `away_long_enough`；配置项 `away_reset`（默认 3 分钟） | 未满阈值回来必须接着计；离开那段也算坐着 |
+| 改到点打断 | 同上 | `fire_reminder`；配置项 `hide_windows` / `show_dialog` / `start_screensaver` / `message` / `title` / `button` / `dialog_timeout` | 演练模式只写日志；防抖离开期间不弹。三项打断都可关 |
+| 改用户配置 | 同上 | `cmd_config`；配置文件 `$STATE_DIR/config` | 文件 + 命令是权威入口。环境变量仅覆盖（测试）。守护循环每轮重读，约 10 秒内生效 |
 | 立刻试响 | 命令 `now` | `cmd_now` | 不等间隔 |
 | 看进度 | 命令 `status` | `cmd_status` + 状态文件 | 必须能回答还有多久 |
 
@@ -92,7 +93,7 @@ stateDiagram-v2
 | `elapsed` | 已连续使用秒数 | `status` 用来算「还有多久」；防抖离开期间仍增加 |
 | `last_reason` | 最近一次心跳/离开原因 | 防抖中为 `away_pending`；验收热角清零看「离开已满3分钟」 |
 | `last_tick` | 上次刷新时间 | 超过约 30 秒未刷新，`status` 视为状态过期 |
-| `interval` | 本段使用的间隔 | 与环境变量一致 |
+| `interval` | 本段使用的间隔 | 与当前生效配置一致；改 `config set interval` 后下一轮心跳会改这个值 |
 
 日志默认：`~/Library/Application Support/standup-reminder/run.log`。
 
@@ -111,6 +112,8 @@ stateDiagram-v2
 - **AI 易错点** 【消歧】「认出离开」vs「已经清零」：热角停 20 秒只证明日志出现「检测到离开」；清零必须停满 3 分钟看到「离开已满3分钟」。20 秒内解锁出现「短离开未满3分钟，继续计时」是正确防抖。合盖长休眠走「休眠已满3分钟」，**不能**当作热角路径已修好。
 - 【叫法统一】正文用「连续使用 / 离开 / 提醒打断」；日志里仍是「解锁 / 离开 / 计时中 / 短离开 / 离开已满」。
 - 【隐性依赖】改离开判断后必须本机热角验收（认出离开停满 20 秒；确认清零停满 3 分钟），单测不够。
+- **AI 易错点** 【禁止】把间隔写进登录项环境变量，或改完配置却要求用户重装/卸登录项。原因：环境变量会盖住配置文件，看起来 `config set` 成功、后台仍按旧间隔计。正确路径：`config set` 写配置文件，循环每轮重读。
+- 【不可配置】轮询 10 秒、判断失败按正在使用、离开必须看锁屏标记+屏保是否在跑——这三项是防「从不响 / 热角不清零」的硬约束，禁止做成开关。
 - 【低置信度】「需要密码才进锁屏」的延迟秒数因系统设置而异；热角后可能先是屏保、再变锁屏。证据：用户用热角进入，日志原因是 `screensaver`。待确认：仅锁屏热角（不经屏保）是否稳定打出 `locked`。
 
 ## §7 常见易忽略条件与验证路径

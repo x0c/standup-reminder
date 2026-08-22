@@ -21,11 +21,5 @@
     <string>__STATE_DIR__/launchagent.out.log</string>
     <key>StandardErrorPath</key>
     <string>__STATE_DIR__/launchagent.err.log</string>
-
-    <key>EnvironmentVariables</key>
-    <dict>
-      <key>REMINDER_INTERVAL</key>
-      <string>3600</string>
-    </dict>
   </dict>
 </plist>
