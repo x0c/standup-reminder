@@ -58,3 +58,5 @@ tail -20 "$HOME/Library/Application Support/standup-reminder/run.log"
    现象：命令显示已经是 80 分钟，实际仍约 1 小时就打断。  
    原因：旧版把间隔写在登录项环境变量里，环境变量会盖住配置文件。  
    处理：升级到 v0.3.0+，用 `standup-reminder config set interval 80m`。不要再改登录项。覆盖安装会把旧登录项里的间隔迁到配置文件。
+
+<!-- 该文档整理/压缩于 2026-09-05 -->

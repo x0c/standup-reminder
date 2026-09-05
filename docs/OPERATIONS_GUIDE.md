@@ -50,3 +50,5 @@ tail -f "$HOME/Library/Application Support/standup-reminder/run.log"
 ```
 
 状态目录默认保留。
+
+<!-- 该文档整理/压缩于 2026-09-05 -->

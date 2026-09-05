@@ -57,13 +57,11 @@ bash tests/test.sh
 
 ## 文档导航
 
-> 以下文档在涉及对应领域的开发、评审或排查时先读取。
-
-- `README.md` / `README.zh-CN.md`：对外安装渠道、命令面、中英同步。
-- `docs/TROUBLESHOOTING.md`：装了从不响、热角/锁屏后计时不清零、离开识别是否真生效。
-- `docs/CONTINUOUS_USE_KNOWLEDGE_BASE.md`：连续使用计时、离开识别、热角屏保/锁屏清零、到点打断、提醒间隔、**改配置项 / `config set`** 前 **必读**。漏读的后果：又把间隔写进登录项，命令改了后台不听。
-- `docs/INSTALL_RESIDENCY_KNOWLEDGE_BASE.md`：本机安装、登录常驻、自检、停止、发版、Homebrew 与安装脚本并存。
-- `docs/OPERATIONS_GUIDE.md`：本机启动、探活、日志路径、停止卸载。
+- `README.md` / `README.zh-CN.md`：改对外安装渠道、命令面或中英同步前必读。
+- `docs/TROUBLESHOOTING.md`：排查「装了从不响 / 热角锁屏后计时不清零 / 离开识别不生效」前**必读**。
+- `docs/CONTINUOUS_USE_KNOWLEDGE_BASE.md`：改连续使用计时、离开识别、热角屏保/锁屏清零、到点打断、提醒间隔或 `config set` 前**必读**。不读会把间隔写进登录项，命令改了后台不听。
+- `docs/INSTALL_RESIDENCY_KNOWLEDGE_BASE.md`：改本机安装、登录常驻、自检、停止、发版，或处理 Homebrew 与安装脚本并存前**必读**。
+- `docs/OPERATIONS_GUIDE.md`：本机启动、探活、查日志或停止卸载前必读。
 
 ## 领域地图（doc-init）
 
