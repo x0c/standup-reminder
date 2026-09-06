@@ -83,7 +83,7 @@ graph TD
 |---|---|---|
 | `~/.local/bin/standup-reminder` | 安装脚本放入的可执行文件 | 改源码后必须再跑安装脚本才生效 |
 | `~/Library/LaunchAgents/io.github.x0c.standup-reminder.plist` | 登录项 | 与 brew 服务不要并存 |
-| `~/Library/Application Support/standup-reminder/` | 状态、PID、日志、**配置文件** | 覆盖安装保留 `config`；`doctor` / `status` 读状态文件 |
+| `~/Library/Application Support/standup-reminder/` | 状态、PID、**单实例锁文件**、日志、**配置文件** | 覆盖安装保留 `config`；`doctor` / `status` 读状态文件；常驻用 `standup_reminder.lock` 的 flock/fcntl 排他锁防双开，PID 文件只作展示 |
 
 ## §5 本域流程 / 组件 / 任务入口索引
 
@@ -98,6 +98,7 @@ graph TD
 - **AI 易错点** 【禁止】安装结束只报「已启动」-> 必须等到自检显示正在计时，否则会重演「进程在跑、从未提醒」。
 - **AI 易错点** 【禁止】`stop` 只杀进程不卸登录项 -> 保活会立刻拉回来。
 - **AI 易错点** 【禁止】本机发版后只推 GitHub、不跑安装脚本 -> 机主仍在跑旧文件。
+- **AI 易错点** 【禁止】单实例只写 PID 文件不持锁 -> 启动竞态下两个守护可同时跑。必须对 `standup_reminder.lock` 做非阻塞排他锁（`flock(1)` 或 python `fcntl.flock`），PID 仅供文案/status。
 - 【禁止】Homebrew 与安装脚本两套常驻同时开。`doctor` 会提示，必须只留一套。本机约定留安装脚本。
 - 【禁止】登录项或 Homebrew 服务写死 `REMINDER_INTERVAL`。发版脚本必须把配方里这类行剥掉。否则 `config set` 改了文件，后台仍用旧间隔。
 - 【禁止】发版把 Homebrew 配方写成比现网更旧的版本。

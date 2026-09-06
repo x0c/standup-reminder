@@ -19,6 +19,8 @@ STATE_DIR=${STATE_DIR:-"$HOME/Library/Application Support/standup-reminder"}
 LOG_FILE=${LOG_FILE:-"$STATE_DIR/run.log"}
 CONFIG_FILE="${STANDUP_CONFIG_FILE:-$STATE_DIR/config}"
 PID_FILE="$STATE_DIR/standup_reminder.pid"
+LOCK_FILE="$STATE_DIR/standup_reminder.lock"
+INSTANCE_LOCK_FD=9
 STATE_FILE="$STATE_DIR/state"
 LAUNCH_LABEL="io.github.x0c.standup-reminder"
 LAUNCH_PLIST="$HOME/Library/LaunchAgents/${LAUNCH_LABEL}.plist"
@@ -756,26 +758,46 @@ fire_reminder() {
   log "提醒流程结束"
 }
 
+# 非阻塞排他锁：优先 flock(1)；macOS 无该命令时用 python fcntl（与 flock 等价）。
+# 锁挂在 INSTANCE_LOCK_FD 上，进程存活期间一直持有，消除「先读 PID 再写」的 TOCTOU。
+try_instance_lock() {
+  local fd="$1"
+  if command -v flock >/dev/null 2>&1; then
+    flock -n "$fd"
+    return $?
+  fi
+  /usr/bin/python3 -c "
+import fcntl, sys
+try:
+    fcntl.flock($fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except (BlockingIOError, OSError):
+    sys.exit(1)
+"
+}
+
 acquire_single_instance() {
-  if [[ -f "$PID_FILE" ]]; then
-    local old_pid
-    old_pid="$(/bin/cat "$PID_FILE" 2>/dev/null || true)"
-    if is_pid_running "$old_pid"; then
-      local cmd
-      cmd="$(/bin/ps -p "$old_pid" -o command= 2>/dev/null || true)"
-      if [[ -n "$cmd" && "$cmd" == *"standup-reminder"* ]]; then
-        log "检测到已有实例在运行 (pid=$old_pid)，本次退出"
-        printf 'standup-reminder 已在运行 (pid=%s)\n' "$old_pid" >&2
-        exit 5
-      fi
+  mkdir -p "$STATE_DIR"
+  # 打开锁文件并保持 FD；持锁失败则立刻退出（第二实例不得继续跑守护循环）
+  eval "exec ${INSTANCE_LOCK_FD}>\"\$LOCK_FILE\""
+  if ! try_instance_lock "$INSTANCE_LOCK_FD"; then
+    local old_pid=""
+    old_pid="$(running_pid 2>/dev/null || true)"
+    if [[ -n "$old_pid" ]]; then
+      log "检测到已有实例在运行 (pid=$old_pid)，本次退出"
+      printf 'standup-reminder 已在运行 (pid=%s)\n' "$old_pid" >&2
+    else
+      log "检测到已有实例持有锁，本次退出"
+      printf 'standup-reminder 已在运行\n' >&2
     fi
+    exit 5
   fi
 
-  mkdir -p "$STATE_DIR"
   printf '%s' "$$" >"$PID_FILE"
 
   cleanup() {
     rm -f "$PID_FILE"
+    # 关 FD 即释放 flock；不删锁文件，避免与下一实例打开同路径交错
+    eval "exec ${INSTANCE_LOCK_FD}>&-" 2>/dev/null || true
     log "退出"
   }
 
@@ -1336,6 +1358,11 @@ case "${1:-start}" in
     fi
     printf 'hold\n'
     exit 1
+    ;;
+  __hold-instance)
+    # 测试用：抢到单实例锁后保持持有，供第二实例验证立刻以退出码 5 退出
+    acquire_single_instance
+    sleep "${2:-3}"
     ;;
   *)
     printf '未知命令: %s\n\n' "$1" >&2

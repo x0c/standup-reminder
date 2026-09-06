@@ -173,4 +173,51 @@ list="$("$BIN" config --json)"
 echo "$list" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); keys={i["key"] for i in d["data"]["items"]}; assert keys=={"interval","away_reset","message","title","button","hide_windows","show_dialog","start_screensaver","dialog_timeout"}'
 pass "config list 含全部项"
 
+# --- 单实例锁（flock / fcntl，覆盖纯 PID 文件 TOCTOU）---
+"$BIN" __hold-instance 8 &
+holder_pid=$!
+# 等持有者写好 PID / 抢到锁
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ -f "$STATE_DIR/standup_reminder.pid" ]] && break
+  sleep 0.1
+done
+[[ -f "$STATE_DIR/standup_reminder.pid" ]] || fail "持有实例应写出 PID 文件"
+set +e
+second_out="$("$BIN" __hold-instance 1 2>&1)"
+second_code=$?
+set -e
+[[ "$second_code" == "5" ]] || fail "第二实例应立刻退出码 5，实际 $second_code；输出: $second_out"
+[[ "$second_out" == *已在运行* ]] || fail "第二实例文案应含已在运行: $second_out"
+kill "$holder_pid" 2>/dev/null || true
+wait "$holder_pid" 2>/dev/null || true
+pass "第二实例立刻退出（单实例锁）"
+
+# 并行抢锁：至多一个成功持有至 sleep 结束
+race_dir="$STATE_DIR/race"
+mkdir -p "$race_dir"
+set +e
+for i in $(seq 1 12); do
+  (
+    "$BIN" __hold-instance 2 >/dev/null 2>&1
+    echo $? >"$race_dir/exit.$i"
+  ) &
+done
+wait
+set -e
+ok_n=0
+fail_n=0
+for f in "$race_dir"/exit.*; do
+  c="$(/bin/cat "$f")"
+  if [[ "$c" == "0" ]]; then
+    ok_n=$((ok_n + 1))
+  elif [[ "$c" == "5" ]]; then
+    fail_n=$((fail_n + 1))
+  else
+    fail "并行抢锁出现意外退出码 $c ($f)"
+  fi
+done
+[[ "$ok_n" == "1" ]] || fail "并行抢锁应恰好 1 个成功，实际成功 $ok_n / 失败 $fail_n"
+[[ "$fail_n" == "11" ]] || fail "并行抢锁应有 11 个退出码 5，实际失败 $fail_n"
+pass "并行抢锁恰好一个成功"
+
 pass "全部通过"
